@@ -1,0 +1,216 @@
+import json
+import random
+import time
+import unicodedata
+import urllib.parse
+import urllib.request
+from deep_translator import GoogleTranslator
+import numpy as np
+import scipy.io.wavfile as wav
+import sounddevice as sd
+import speech_recognition as sr
+
+# 1. Bilingual word lists by difficulty level
+words_es = {
+    "facil": ["gato", "perro", "manzana", "leche", "sol"],
+    "medio": ["banano", "escuela", "amigo", "ventana", "amarillo"],
+    "dificil": [
+        "tecnologia",
+        "universidad",
+        "informacion",
+        "pronunciacion",
+        "imaginacion",
+    ],
+}
+
+words_en = {
+    "easy": ["cat", "dog", "apple", "milk", "sun"],
+    "medium": ["banana", "school", "friend", "window", "yellow"],
+    "hard": [
+        "technology",
+        "university",
+        "information",
+        "pronunciation",
+        "imagination",
+    ],
+}
+
+
+def limpiar_texto(texto):
+  """Removes accents and converts to lowercase for fair pronunciation matching"""
+  return "".join(
+      c
+      for c in unicodedata.normalize("NFD", texto)
+      if unicodedata.category(c) != "Mn"
+  ).lower()
+
+
+def traducir(texto, source_lang="es", target_lang="en"):
+  # Option 1: Direct Google Translate API
+  try:
+    url = f"https://translate.googleapis.com/translate_a/single?client=gtx&sl={source_lang}&tl={target_lang}&dt=t&q={urllib.parse.quote(texto)}"
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+
+    with urllib.request.urlopen(req, timeout=10) as respuesta:
+      datos = json.loads(respuesta.read().decode("utf-8"))
+      return datos[0][0][0]
+  except Exception as error:
+    print(f"Google directo falló: {error}")
+
+  # Option 2: MyMemory fallback
+  try:
+    parametros = urllib.parse.urlencode(
+        {"q": texto, "langpair": f"{source_lang}|{target_lang}"}
+    )
+    url = f"https://api.mymemory.translated.net/get?{parametros}"
+
+    with urllib.request.urlopen(url, timeout=10) as respuesta:
+      datos = json.loads(respuesta.read().decode("utf-8"))
+
+    return datos["responseData"]["translatedText"]
+  except Exception as error:
+    print(f"MyMemory falló: {error}")
+
+  return None
+
+
+print("🦉 ¡Bienvenido a Duolingo Voice Game! / Welcome to the Voice Game!")
+
+# Safe Game Setup with bilingual choice
+try:
+  # Choose which language you want to practice speaking
+  practice_lang = (
+      input("¿Qué idioma quieres practicar? ('es' - español / 'en' - inglés): ")
+      .strip()
+      .lower()
+  )
+  if practice_lang not in ["es", "en"]:
+    practice_lang = "es"
+
+  if practice_lang == "es":
+    words_by_level = words_es
+    default_nivel = "facil"
+    print("Niveles disponibles: facil, medio, dificil")
+  else:
+    words_by_level = words_en
+    default_nivel = "easy"
+    print("Niveles disponibles: easy, medium, hard")
+
+  nivel = (
+      input(f"Elige tu nivel de dificultad: ").strip().lower()
+  )
+  if nivel not in words_by_level:
+    nivel = default_nivel
+
+  # Choose target translation language
+  lang = (
+      input(
+          "¿A qué idioma debo traducir? (ej., 'en' – inglés, 'es' – español, 'it'"
+          " – italiano): "
+      )
+      .strip()
+      .lower()
+  )
+  if not lang:
+    lang = "en" if practice_lang == "es" else "es"
+
+except (KeyboardInterrupt, EOFError):
+  print("\n⚠️ Entrada cancelada. Usando configuración por defecto.")
+  practice_lang = "es"
+  words_by_level = words_es
+  nivel = "facil"
+  lang = "en"
+
+# Scoring and Game-Over tracking variables
+score = 0
+errores = 0
+max_errores = 3
+
+print(
+    f"\n🚀 ¡Comienza el juego! Vidas: {max_errores} | Practicando:"
+    f" {practice_lang.upper()} ({nivel.upper()}) -> Traduciendo a:"
+    f" {lang.upper()}\n"
+)
+
+# Configuration for audio recording
+duration = 4  # recording duration in seconds
+sample_rate = 44100
+recognizer = sr.Recognizer()
+
+# Main Game Loop (Runs until 3 mistakes are made)
+while errores < max_errores:
+  palabra_objetivo = random.choice(words_by_level[nivel])
+
+  print(f"\n--------------------------------------------------")
+  print(f"📊 Puntuación: {score} | ❌ Errores: {errores}/{max_errores}")
+  print(
+      f"🦉 Di en voz alta esta palabra en"
+      f" {'español' if practice_lang == 'es' else 'inglés'}:"
+      f" **{palabra_objetivo.upper()}**"
+  )
+
+  print("🎙️ Prepárate...")
+  time.sleep(0.8)
+  print("🔴 ¡HABLA YA!")
+
+  try:
+    recording = sd.rec(
+        int(duration * sample_rate),
+        samplerate=sample_rate,
+        channels=1,
+        dtype="int16",
+    )
+    for i in range(duration, 0, -1):
+      print(f"   ({i}s...)")
+      time.sleep(1)
+    sd.wait()
+  except KeyboardInterrupt:
+    print("\n⚠️ Grabación cancelada por el usuario.")
+    break
+
+  wav.write("output.wav", sample_rate, recording)
+
+  try:
+    with sr.AudioFile("output.wav") as source:
+      audio = recognizer.record(source)
+
+    # Recognize speech matching the practice language
+    text = recognizer.recognize_google(audio, language=practice_lang)
+    recognized = text.lower()
+    print(f"🗣️ Dijiste: '{recognized}'")
+
+    # Translate the target word using the selected source and target languages
+    resultado_traduccion = traducir(
+        palabra_objetivo, source_lang=practice_lang, target_lang=lang
+    )
+
+    if resultado_traduccion:
+      print(
+          f"🌍 Traducción correcta ({lang}): '{palabra_objetivo}' ->"
+          f" {resultado_traduccion}"
+      )
+
+      if limpiar_texto(palabra_objetivo) in limpiar_texto(recognized):
+        print("✨ ¡Excelente! Pronunciación correcta. (+1 punto)")
+        score += 1
+      else:
+        print(
+            f"⚠️ Intentabas decir '{palabra_objetivo}', pero dijiste"
+            f" '{recognized}'."
+        )
+        errores += 1
+    else:
+      print("❌ No se pudo traducir el texto.")
+
+  except sr.UnknownValueError:
+    print("❌ No se pudo reconocer el habla / Could not understand audio.")
+    errores += 1
+  except sr.RequestError as e:
+    print(f"❌ Error del servicio / Could not request results: {e}")
+    errores += 1
+
+# Game Over Screen
+print("\n" + "=" * 50)
+print("🎮 ¡JUEGO TERMINADO / GAME OVER! 🎮")
+print(f"🏆 Puntuación final: {score} palabras correctas.")
+print("=" * 50)
